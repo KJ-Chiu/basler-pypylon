@@ -13,6 +13,7 @@
 # ===============================================================================
 from collections import deque
 from datetime import datetime
+import threading
 import cv2
 import numpy as np
 from pypylon import pylon
@@ -25,73 +26,94 @@ FRAME_HEIGHT = 540
 
 FRAME_RATE = 450
 
+DURATION = 3
+
 # The exit code of the sample application.
 exitCode = 0
 
-try:
-    # Create an instant camera object with the camera device found first.
-    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
-    camera.Open()
+# Create an instant camera object with the camera device found first.
+camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+camera.Open()
 
-    # Print the model name of the camera.
-    print("Using device ", camera.GetDeviceInfo().GetModelName())
+# Print the model name of the camera.
+print("Using device ", camera.GetDeviceInfo().GetModelName())
 
-    camera.Width.SetValue(FRAME_WIDTH)
-    camera.Height.SetValue(FRAME_HEIGHT)
+camera.Width.SetValue(FRAME_WIDTH)
+camera.Height.SetValue(FRAME_HEIGHT)
+camera.CenterX.SetValue(True)
+camera.CenterY.SetValue(True)
 
-    # The parameter MaxNumBuffer can be used to control the count of buffers
-    # allocated for grabbing. The default value of this parameter is 10.
-    camera.MaxNumBuffer = 10
+camera.PixelFormat.SetValue("BGR8")
+camera.Gamma.SetValue(1)
+camera.ExposureTime = int(1000000 / FRAME_RATE)
 
-    # Start the grabbing of c_countOfImagesToGrab images.
-    # The camera device is parameterized with a default configuration which
-    # sets up free-running continuous acquisition.
-    camera.StartGrabbingMax(FRAME_RATE * 6)
+camera.AcquisitionFrameRateEnable.SetValue(True)
+camera.AcquisitionFrameRate.SetValue(FRAME_RATE)
 
-    images: deque[np.ndarray] = deque(maxlen=FRAME_RATE * 5)
-    timestamps: deque[datetime] = deque(maxlen=FRAME_RATE * 5)
+# The parameter MaxNumBuffer can be used to control the count of buffers
+# allocated for grabbing. The default value of this parameter is 10.
+camera.MaxNumBuffer = 10
 
-    converter = pylon.ImageFormatConverter()
-    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
-    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+# Start the grabbing of c_countOfImagesToGrab images.
+# The camera device is parameterized with a default configuration which
+# sets up free-running continuous acquisition.
+# camera.StartGrabbingMax(FRAME_RATE * 6)
+camera.StartGrabbing()
 
-    # Camera.StopGrabbing() is called automatically by the RetrieveResult() method
-    # when c_countOfImagesToGrab images have been retrieved.
-    count = 0
-    while camera.IsGrabbing():
-        # Wait for an image and then retrieve it. A timeout of 5000 ms is used.
-        grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+images: deque[np.ndarray] = deque(maxlen=FRAME_RATE * DURATION)
+timestamps: deque[datetime] = deque(maxlen=FRAME_RATE * DURATION)
 
-        # Image grabbed successfully?
-        if grabResult.GrabSucceeded():
-            img = converter.Convert(grabResult)
-            images.append(img.GetArray())
-            timestamps.append(datetime.now())
-            print(count)
-        else:
-            print("Error: ", grabResult.ErrorCode, grabResult.ErrorDescription)
-        grabResult.Release()
-        count += 1
-    camera.Close()
+converter = pylon.ImageFormatConverter()
+converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+# converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
-    out = cv2.VideoWriter(
-        "slomo_{}-{}.avi".format(
-            timestamps[0].strftime("%H%M%S"), timestamps[-1].strftime("%H%M%S")
-        ),
-        fourcc,
-        60,
-        (FRAME_WIDTH, FRAME_HEIGHT),
-    )
-    for image in images:
-        print(image.shape)
-        out.write(image)
-    out.release()
+stopEvent = threading.Event()
 
-except genicam.GenericException as e:
-    # Error handling.
-    print("An exception occurred.")
-    print(e.GetDescription())
-    exitCode = 1
 
-sys.exit(exitCode)
+def grab():
+    grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+
+    # Image grabbed successfully?
+    if grabResult.GrabSucceeded():
+        img = converter.Convert(grabResult)
+        images.append(img.GetArray())
+        timestamps.append(datetime.now())
+    else:
+        print("Error: ", grabResult.ErrorCode, grabResult.ErrorDescription)
+    grabResult.Release()
+
+
+seq = 0
+while True:
+    grab()
+    if seq % 6 == 0:
+        cv2.imshow("Cur", cv2.rotate(images[-1], cv2.ROTATE_90_CLOCKWISE))
+    seq += 1
+
+    k = cv2.waitKey(1) & 0xFF
+    if k == 13:
+        print("start record")
+        images.clear()
+        timestamps.clear()
+        while len(images) < FRAME_RATE * DURATION:
+            grab()
+
+        fourcc = cv2.VideoWriter_fourcc(*"XVID")
+        out = cv2.VideoWriter(
+            "slomo_{}-{}.avi".format(
+                timestamps[0].strftime("%H%M%S"), timestamps[-1].strftime("%H%M%S")
+            ),
+            fourcc,
+            60,
+            (FRAME_WIDTH, FRAME_HEIGHT),
+        )
+        for image in list(images):
+            out.write(image)
+        out.release()
+        continue
+
+    if k == 27:
+        break
+
+camera.StopGrabbing()
+camera.Close()
